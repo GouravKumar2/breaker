@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Breaker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --card:#f4f4f6; --bd:#d0d0d6; --ok:#1a7f37; --bad:#c62828; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16161a; --fg:#e8e8ee; --card:#222228; --bd:#3a3a44; --ok:#4cc26a; --bad:#ff6b6b; --warn:#f0b34a; }
+  }
+  body { background:var(--bg); color:var(--fg); font:15px system-ui,sans-serif; max-width:1000px; margin:24px auto; padding:0 16px; }
+  h1 { margin:0 0 4px; } .sub { opacity:.7; margin-bottom:16px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:700px) { .row { grid-template-columns:1fr; } }
+  textarea { width:100%; height:260px; box-sizing:border-box; font:13px ui-monospace,Consolas,monospace;
+             background:var(--card); color:var(--fg); border:1px solid var(--bd); border-radius:6px; padding:8px; }
+  label { font-weight:600; display:block; margin:8px 0 4px; }
+  .bar { display:flex; gap:12px; align-items:center; margin:12px 0; flex-wrap:wrap; }
+  select, button { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--bd); background:var(--card); color:var(--fg); }
+  button.go { background:#3b5bdb; color:#fff; border-color:#3b5bdb; cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .panel { background:var(--card); border:1px solid var(--bd); border-radius:8px; padding:12px 16px; margin-top:12px; }
+  .v { font-size:20px; font-weight:700; } .BROKEN { color:var(--bad); } .NO_BUG_FOUND { color:var(--ok); }
+  .INCONCLUSIVE,.ERROR { color:var(--warn); }
+  pre { background:var(--bg); border:1px solid var(--bd); border-radius:6px; padding:8px; overflow-x:auto; margin:4px 0 10px; }
+  table { width:100%; border-collapse:collapse; } td,th { text-align:left; padding:4px 8px; border-bottom:1px solid var(--bd); }
+  tr.h { cursor:pointer; } tr.h:hover { background:var(--bg); }
+</style>
+</head>
+<body>
+<h1>Breaker</h1>
+<div class="sub">Paste a problem and your solution. The agent tries to find an input where it's wrong.</div>
+<div class="row">
+  <div><label for="problem">Problem statement</label><textarea id="problem"></textarea></div>
+  <div><label for="solution">Your solution</label><textarea id="solution"></textarea></div>
+</div>
+<div class="bar">
+  <select id="language"><option value="python">Python</option><option value="cpp">C++</option></select>
+  <select id="strategy"><option value="generic">Generic edge cases</option><option value="boundary">Boundary-focused</option></select>
+  <button class="go" id="go">Break it</button>
+  <span id="status"></span>
+</div>
+<div id="result"></div>
+<div class="panel"><b>History</b><table id="hist"></table></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function render(r) {
+  let h = `<div class="panel"><div class="v ${r.verdict}">${r.verdict}</div>
+    <div>${r.total_tests} tests run (${r.invalid_tests} rejected as invalid) in ${r.runtime_s}s | strategy: ${r.strategy}</div>`;
+  if (r.verdict === "BROKEN") {
+    h += `<label>Minimal failing input</label><pre>${esc(r.minimized_input)}</pre>
+          <label>Expected</label><pre>${esc(r.expected_output)}</pre>
+          <label>Actual (your solution)</label><pre>${esc(r.actual_output)}</pre>
+          <div>Failure type: ${esc(r.failure_verdict)}</div>`;
+  } else if (r.verdict === "NO_BUG_FOUND") {
+    h += `<p>No counterexample found. That is not a proof of correctness.</p>`;
+  } else if (r.verdict === "INCONCLUSIVE") {
+    h += `<p>No valid test ever ran (all rejected by the validator or reference). Try again.</p>`;
+  }
+  if (r.error) h += `<pre>${esc(r.error)}</pre>`;
+  $("result").innerHTML = h + "</div>";
+}
+
+async function show(id) {
+  const r = await (await fetch(`/runs/${id}`)).json();
+  render(r);
+}
+
+async function loadHistory() {
+  const rows = await (await fetch("/runs?limit=15")).json();
+  $("hist").innerHTML = "<tr><th>#</th><th>Verdict</th><th>Strategy</th><th>Lang</th><th>Tests</th><th>Time</th></tr>" +
+    rows.map(r => `<tr class="h" onclick="show(${r.id})"><td>${r.id}</td><td class="${r.verdict}">${r.verdict}</td>
+      <td>${r.strategy}</td><td>${r.language}</td><td>${r.total_tests}</td><td>${r.runtime_s}s</td></tr>`).join("");
+}
+
+$("go").onclick = async () => {
+  const body = { problem: $("problem").value, solution: $("solution").value,
+                 language: $("language").value, strategy: $("strategy").value };
+  $("go").disabled = true; $("status").textContent = "Running... (can take 1-2 min)"; $("result").innerHTML = "";
+  try {
+    const res = await fetch("/break", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error("Request rejected: " + (await res.text()));
+    const { job } = await res.json();
+    while (true) {
+      await new Promise(r => setTimeout(r, 2500));
+      const st = await (await fetch(`/jobs/${job}`)).json();
+      if (st.status === "done") { await show(st.run_id); break; }
+      if (st.status === "error") { $("result").innerHTML = `<div class="panel ERROR">Error: ${esc(st.error)}</div>`; break; }
+    }
+  } catch (e) {
+    $("result").innerHTML = `<div class="panel ERROR">${esc(e.message)}</div>`;
+  } finally {
+    $("go").disabled = false; $("status").textContent = ""; loadHistory();
+  }
+};
+loadHistory();
+</script>
+</body>
+</html>
