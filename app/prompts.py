@@ -65,3 +65,23 @@ def tests_prompt(problem: str, strategy: str, n: int, focus: str | None = None, 
         parts.append(f"These inputs were already tried and passed; do NOT repeat or trivially vary them:\n{shown}")
     parts.append("Each small test's `input` is the exact stdin contents, ending with a newline.")
     return "\n\n".join(parts)
+
+
+def reference_fix_prompt(problem: str, code: str, failures: list) -> str:
+    shown = "\n\n".join(f"Input:\n{ex.input.rstrip()}\nExpected output:\n{ex.output.rstrip()}\nYour program: {why}"
+                         for ex, why in failures[:3])
+    return (
+        f"Problem statement:\n{problem}\n\nYour previous brute-force solution:\n```python\n{code}\n```\n\n"
+        f"It FAILED these examples from the statement:\n\n{shown}\n\n"
+        "Re-read the input format, output format and edge cases, then write a corrected, simple brute-force "
+        "Python 3 solution. Return it in the schema."
+    )
+
+
+def validator_fix_prompt(problem: str, code: str, rejected: list[str]) -> str:
+    shown = "\n---\n".join(r.rstrip() for r in rejected[:3])
+    return (
+        f"Problem statement:\n{problem}\n\nYour previous input validator:\n```python\n{code}\n```\n\n"
+        f"It wrongly REJECTED these inputs, which are valid examples from the statement:\n{shown}\n\n"
+        "Fix the validator (exact format and every stated constraint; exit 0 if valid, sys.exit(1) otherwise)."
+    )

@@ -33,7 +33,7 @@ def save_run(db: Session, problem: str, code: str, language: str, strategy: str,
         expected_output=_cut(r.minimized.expected) if r.minimized else None,
         actual_output=_cut(r.minimized.actual) if r.minimized else None,
         failure_verdict=r.failing.verdict if r.failing else None,
-        steps=r.steps, reference_notes=r.reference_notes, error=r.error[:2000],
+        steps=r.steps, reference_notes=r.reference_notes, error=(r.error or r.reason)[:2000],
     )
     db.add(run)
     db.flush()
@@ -54,10 +54,20 @@ def run_to_dict(run: Run, detail: bool = False) -> dict:
         "minimized_input": run.minimized_input, "expected_output": run.expected_output,
         "actual_output": run.actual_output, "failure_verdict": run.failure_verdict,
         "created_at": run.created_at.isoformat(), "error": run.error,
+        "title": (run.solution.problem.statement.strip().splitlines() or [""])[0][:80],
     }
     if detail:
         d["failing_input"] = run.failing_input
         d["steps"] = run.steps
+        v = next((s["result"] for s in (run.steps or []) if s.get("action") == "validate_reference"), None)
+        d["oracle"] = v
+        reasons = {t.input: t.reasoning for t in run.tests}
+        cut = lambda s: (s or "")[:2000]
+        results = sorted(run.results, key=lambda x: x.id)
+        d["tests"] = [{"category": x.category, "verdict": x.verdict, "runtime_ms": round(x.sol_runtime_ms),
+                       "input": cut(x.input), "expected": cut(x.expected), "actual": cut(x.actual),
+                       "reasoning": reasons.get(x.input, "")} for x in results]
+        d["failure_category"] = next((x.category for x in results if x.verdict.startswith("fail")), None)
         d["reference_notes"] = run.reference_notes
         d["oracle_rebuilds"] = run.oracle_rebuilds
         d["problem"] = run.solution.problem.statement

@@ -18,7 +18,7 @@ T = TypeVar("T", bound=BaseModel)
 _client: genai.Client | None = None
 
 HTTP_TIMEOUT_MS = 90_000
-MIN_GAP_S = 4.0   # free tier gemini-2.5-flash = 5 req/min. Use 4.0 for gemini-2.5-flash-lite
+MIN_GAP_S = 4.0   # seconds between calls (free tier is rate limited); the throttle is lock-protected
 _last_call = 0.0
 _throttle_lock = threading.Lock()
 
@@ -50,9 +50,13 @@ def _get_client() -> genai.Client:
 
 
 def _cfg(**kw) -> types.GenerateContentConfig:
-    # Flash models: skip "thinking" for speed (it makes big JSON outputs very slow).
-    if "flash" in settings.gemini_model and "3.5" not in settings.gemini_model:
-        kw["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    # gemini-2.5 flash models: turn "thinking" off for speed (it makes big JSON outputs very slow).
+    # Other models keep their default unless GEMINI_THINKING_BUDGET is set explicitly.
+    budget = settings.gemini_thinking_budget
+    if budget is None and settings.gemini_model.startswith("gemini-2.5"):
+        budget = 0
+    if budget is not None:
+        kw["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
     return types.GenerateContentConfig(**kw)
 
 

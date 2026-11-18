@@ -6,7 +6,7 @@ from google.genai import types
 
 from app.harness import needs_wrap, wrap, language_mismatch
 from app.llm import _cfg, _log, _call
-from app.normalize import normalize_problem
+from app.normalize import get_examples, normalize_problem
 from app.sandbox import Program
 from app.schemas import TestCase
 from app.tools import (Oracle, CaseResult, make_oracle, generate_tests,
@@ -63,6 +63,11 @@ class BreakResult:
     runtime_s: float = 0.0
     oracle_rebuilds: int = 0
     error: str = ""
+    reason: str = ""                     # why the verdict is INCONCLUSIVE (human-readable)
+    oracle_confidence: str = ""          # verified | unverified | failed
+    oracle_attempts: int = 0
+    samples_passed: int = 0
+    samples_total: int = 0
 
     def to_dict(self):
         return {
@@ -77,15 +82,43 @@ class BreakResult:
             "reference_notes": self.reference_notes,
             "validator_notes": self.validator_notes,
             "error": self.error,
+            "reason": self.reason,
+            "oracle_confidence": self.oracle_confidence,
+            "oracle_attempts": self.oracle_attempts,
+            "samples_passed": self.samples_passed,
+            "samples_total": self.samples_total,
         }
+
+
+class _StepLog(list):
+    """List that notifies a callback on every append, so the API can stream steps while the job runs."""
+    def __init__(self, cb):
+        super().__init__()
+        self._cb = cb
+
+    def append(self, item):
+        super().append(item)
+        self._cb(item)
+
+
+def _record_oracle(out: "BreakResult", oracle: Oracle) -> None:
+    out.oracle_confidence, out.oracle_attempts = oracle.confidence, oracle.attempts
+    out.samples_passed, out.samples_total = oracle.samples_passed, oracle.samples_total
+    out.steps.append({"step": 0, "action": "validate_reference", "result": {
+        "confidence": oracle.confidence, "samples_passed": oracle.samples_passed,
+        "samples_total": oracle.samples_total, "attempts": oracle.attempts, "note": oracle.check_note}})
 
 
 def run_break(problem: str, solution_code: str, language: str,
               strategy: str = "generic", n_tests: int = 25,
-              oracle: Oracle | None = None) -> BreakResult:
+              oracle: Oracle | None = None, on_step=None, on_phase=None) -> BreakResult:
     t0 = time.perf_counter()
     out = BreakResult(verdict="NO_BUG_FOUND")
+    if on_step:
+        out.steps = _StepLog(on_step)
+    phase = on_phase or (lambda _p: None)
     owned: list[Oracle] = []          # oracles created here (cleaned up at the end)
+    examples: list = []
     mismatch = language_mismatch(solution_code, language)
     if mismatch:
         out.verdict, out.error = "ERROR", mismatch
@@ -94,13 +127,16 @@ def run_break(problem: str, solution_code: str, language: str,
 
     # Step 0a: raw statement -> canonical stdin/stdout spec (everything below uses the spec)
     raw_problem = problem
+    phase("Normalizing problem statement")
     problem, spec_note = normalize_problem(raw_problem, solution_code, language)
     out.steps.append({"step": 0, "action": "normalize_problem", "result": spec_note, "spec": problem[:1500]})
+    examples = get_examples(raw_problem)
 
     # Step 0b: LeetCode-style code -> runnable program
     harness_note = ""
     runnable = solution_code
     if needs_wrap(solution_code, language):
+        phase("Wrapping LeetCode-style solution")
         try:
             runnable, harness_note = wrap(problem, solution_code, language)
             _log(f"wrapped LeetCode-style solution: {harness_note}")
@@ -116,9 +152,15 @@ def run_break(problem: str, solution_code: str, language: str,
         return out
     try:
         if oracle is None:
-            oracle = make_oracle(problem)
+            phase("Building reference solution + input validator")
+            oracle = make_oracle(problem, examples)
             owned.append(oracle)
         out.reference_notes, out.validator_notes = oracle.ref_notes, oracle.validator_notes
+        _record_oracle(out, oracle)
+        if oracle.confidence == "failed":
+            # Do not hunt for bugs with an oracle we know is wrong: that is how false BROKEN verdicts happen.
+            out.verdict, out.reason = "INCONCLUSIVE", f"Reference solution could not be validated: {oracle.check_note}"
+            return out
         if harness_note:
             out.steps.append({"step": 0, "action": "wrap_solution", "result": harness_note})
 
@@ -145,9 +187,11 @@ def run_break(problem: str, solution_code: str, language: str,
             if len(run) >= 5 and all(r.verdict == "invalid_test" for r in run) and out.oracle_rebuilds < 1:
                 _log("entire batch invalid -> rebuilding oracle once")
                 out.oracle_rebuilds += 1
-                oracle = make_oracle(problem)
+                phase("Rebuilding oracle (whole batch was invalid)")
+                oracle = make_oracle(problem, examples)
                 owned.append(oracle)
                 out.reference_notes, out.validator_notes = oracle.ref_notes, oracle.validator_notes
+                _record_oracle(out, oracle)
                 run = run_in_sandbox(oracle, sol, pending, stop_on_fail=True)
                 rebuilt = True
             executed_pending = True
@@ -161,7 +205,7 @@ def run_break(problem: str, solution_code: str, language: str,
             return {"ran": len(run), "invalid_tests": len(invalid),
                     "invalid_reason": invalid[0].stderr[:100] if invalid else None,
                     "passed": sum(r.verdict == "pass" for r in run),
-                    "failure_found": fail is not None, "slowest_ms": round(slow),
+                    "failure_found": fail is not None, "slowest_ms": int(round(slow, -2)),
                     "failure_verdict": fail.verdict if fail else None,
                     "failure_category": fail.category if fail else None,
                     "oracle_rebuilt": rebuilt}
@@ -185,6 +229,7 @@ def run_break(problem: str, solution_code: str, language: str,
 
         for step in range(MAX_STEPS):
             _log(f"agent step {step + 1}")
+            phase("Agent choosing next tool")
             resp = _call(contents, cfg)   # throttled + retry-aware
             cand = resp.candidates[0].content if resp.candidates else None
             calls = [p.function_call for p in (cand.parts if cand and cand.parts else []) if p.function_call]
@@ -195,6 +240,7 @@ def run_break(problem: str, solution_code: str, language: str,
             reply_parts = []
             for fc in calls:
                 args = dict(fc.args or {})
+                phase(f"Running {fc.name}")
                 fn = tools.get(fc.name)
                 result = fn(args) if fn else {"error": f"unknown tool {fc.name}"}
                 out.steps.append({"step": step + 1, "action": fc.name, "args": args, "result": result})
@@ -204,6 +250,7 @@ def run_break(problem: str, solution_code: str, language: str,
                 break
 
         # Fallbacks: guarantee tests actually ran and a minimized counterexample exists
+        phase("Finalizing")
         if pending and not executed_pending and out.failing is None:
             r = t_run()
             out.steps.append({"step": "auto", "action": "run_in_sandbox", "result": r})
@@ -218,7 +265,10 @@ def run_break(problem: str, solution_code: str, language: str,
         out.total_tests = len(out.all_results)
         out.invalid_tests = sum(r.verdict == "invalid_test" for r in out.all_results)
         valid_runs = out.total_tests - out.invalid_tests
-        if out.failing is not None:
+        if oracle.confidence == "failed":
+            out.verdict, out.failing, out.minimized = "INCONCLUSIVE", None, None
+            out.reason = f"Reference solution could not be validated: {oracle.check_note}"
+        elif out.failing is not None:
             out.verdict = "BROKEN"
         elif valid_runs == 0:
             out.verdict = "INCONCLUSIVE"   # nothing valid ever ran: not evidence the solution is correct

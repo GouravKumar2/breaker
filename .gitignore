@@ -44,3 +44,4 @@ Thumbs.db
 eval/cache/*
 !eval/cache/.gitkeep
 eval/results/raw.jsonl
+breaker_llm_cache.jsonl

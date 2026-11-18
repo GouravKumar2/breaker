@@ -1,0 +1,38 @@
+[
+ {
+  "id": "max_subarray-missing_edge_case__init_zero",
+  "title": "Max Subarray: breaks on all-negative input",
+  "language": "python",
+  "strategy": "boundary",
+  "note": "best starts at 0",
+  "problem": "Maximum Subarray Sum.\n\nInput: the first line contains n (1 <= n <= 100000). The second line contains n integers a_1 ... a_n (|a_i| <= 10^9).\nOutput: a single integer, the maximum sum over all non-empty contiguous subarrays.",
+  "code": "n = int(input())\na = list(map(int, input().split()))\nbest = 0\ncur = 0\nfor x in a:\n    cur = max(0, cur + x)\n    best = max(best, cur)\nprint(best)\n"
+ },
+ {
+  "id": "longest_inc_run-flip_comparison__non_strict",
+  "title": "Longest Increasing Run: non-strict comparison",
+  "language": "python",
+  "strategy": "boundary",
+  "note": ">= instead of >",
+  "problem": "Longest Increasing Run.\n\nInput: the first line contains n (1 <= n <= 100000). The second line contains n integers a_1 ... a_n (|a_i| <= 10^9).\nOutput: a single integer, the length of the longest contiguous subarray in which every element is strictly greater than the previous one.",
+  "code": "n = int(input())\na = list(map(int, input().split()))\nbest = 1\ncur = 1\nfor i in range(1, n):\n    if a[i] >= a[i - 1]:\n        cur += 1\n    else:\n        cur = 1\n    best = max(best, cur)\nprint(best)\n"
+ },
+ {
+  "id": "lower_bound-off_by_one__hi_n_minus_1",
+  "title": "Lower Bound: wrong upper bound",
+  "language": "python",
+  "strategy": "boundary",
+  "note": "hi = n-1 misses the 'none found' case",
+  "problem": "Lower Bound.\n\nInput: the first line contains n (1 <= n <= 100000). The second line contains n integers a_1 <= a_2 <= ... <= a_n (|a_i| <= 10^9), sorted in non-decreasing order. The third line contains an integer x (|x| <= 10^9).\nOutput: the smallest 0-based index i such that a_i >= x, or n if no such index exists.",
+  "code": "n = int(input())\na = list(map(int, input().split()))\nx = int(input())\nlo, hi = 0, n - 1\nwhile lo < hi:\n    mid = (lo + hi) // 2\n    if a[mid] >= x:\n        hi = mid\n    else:\n        lo = mid + 1\nprint(lo)\n"
+ },
+ {
+  "id": "max_subarray-correct",
+  "title": "Max Subarray: correct solution (expect NO BUG FOUND)",
+  "language": "python",
+  "strategy": "boundary",
+  "note": "control",
+  "problem": "Maximum Subarray Sum.\n\nInput: the first line contains n (1 <= n <= 100000). The second line contains n integers a_1 ... a_n (|a_i| <= 10^9).\nOutput: a single integer, the maximum sum over all non-empty contiguous subarrays.",
+  "code": "n = int(input())\na = list(map(int, input().split()))\nbest = a[0]\ncur = a[0]\nfor x in a[1:]:\n    cur = max(x, cur + x)\n    best = max(best, cur)\nprint(best)\n"
+ }
+]

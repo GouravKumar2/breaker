@@ -2,9 +2,10 @@
 This spec, not the raw text, feeds the reference, validator, test generator and driver."""
 from app.llm import generate_structured, _log
 from app.models import sha
-from app.schemas import ProblemSpec
+from app.schemas import ProblemSpec, SpecExample
 
 _CACHE: dict[str, str] = {}
+_SPECS: dict[str, ProblemSpec] = {}
 
 SYSTEM = "You convert programming problem statements into precise, unambiguous stdin/stdout specifications."
 
@@ -45,7 +46,17 @@ def normalize_problem(raw: str, code: str, language: str) -> tuple[str, str]:
         spec = generate_structured(prompt, ProblemSpec, system=SYSTEM, temperature=0.1)
         text = spec_to_text(spec)
         _CACHE[key] = text
+        _SPECS[key] = spec
         return text, "spec generated"
     except Exception as e:
         _log(f"normalize failed, using raw statement: {e}")
         return raw, f"normalize failed, raw statement used: {str(e)[:120]}"
+
+
+def get_examples(raw: str) -> list[SpecExample]:
+    """Statement examples (canonical stdin/stdout) from the cached spec. Empty if unknown, or if several outputs
+    are valid per input (exact-match checking would be wrong there)."""
+    spec = _SPECS.get(sha(raw))
+    if spec is None or spec.multiple_valid_answers:
+        return []
+    return [e for e in spec.examples if e.input.strip() and e.output.strip()]

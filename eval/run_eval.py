@@ -17,7 +17,7 @@ from pathlib import Path
 
 from app import llm
 from app.config import settings
-from app.normalize import normalize_problem
+from app.normalize import get_examples, normalize_problem
 from app.tools import make_oracle
 from eval.common import CACHE_DIR, ROOT, build_variants, load_problems
 
@@ -36,6 +36,7 @@ def load_done() -> dict[str, dict]:
             except ValueError:
                 continue
             if row.get("verdict") != "ERROR":      # errors (quota, network) get retried
+                row.setdefault("validation", "off")   # rows from before Part B had no reference validation
                 done[row["key"]] = row
     return done
 
@@ -46,9 +47,12 @@ def rate(n, d):
 
 def summarize(rows: list[dict]) -> str:
     rows = [r for r in rows if r["model"] == settings.gemini_model] or rows
+    all_rows = rows
+    mode = "on" if any(r["validation"] == "on" for r in rows) else "off"
+    rows = [r for r in rows if r["validation"] == mode]
     strategies = sorted({r["strategy"] for r in rows})
     out = [f"# Breaker eval results\n", f"Model: `{', '.join(sorted({r['model'] for r in rows}))}`. "
-           f"Problems: {len({r['problem'] for r in rows})}. Runs: {len(rows)}.\n",
+           f"Problems: {len({r['problem'] for r in rows})}. Runs: {len(rows)}. Reference validation: **{mode}**.\n",
            "Buggy variants are only counted if a witness input proves they differ from the correct solution. "
            "ERROR runs are excluded from the rates (they are retried on the next run); INCONCLUSIVE counts as a miss.\n"]
 
@@ -93,7 +97,24 @@ def summarize(rows: list[dict]) -> str:
         out.append(f"| {p} | {len(bug)} | {rate(sum(r['verdict'] == 'BROKEN' for r in bug), len(bug))} | "
                    f"{sum(r['verdict'] == 'BROKEN' for r in ok)}/{len(ok)} |")
 
-    # Oracle confidence (filled by Part B; absent before that)
+    # Before/after: same (problem, variant, strategy) runs with and without reference validation
+    def ids(m):
+        return {(r["problem"], r["variant"], r["strategy"]): r for r in all_rows
+                if r["validation"] == m and r["verdict"] != "ERROR"}
+    off, on = ids("off"), ids("on")
+    common = sorted(set(off) & set(on))
+    if common:
+        out.append("\n## Reference validation: before vs after (identical runs)\n")
+        out.append("| Reference validation | Bug catch rate | False-alarm rate | Inconclusive (correct solutions) | Inconclusive (buggy) |")
+        out.append("|---|---|---|---|---|")
+        for label, d in (("off (before)", off), ("on (after)", on)):
+            bug = [d[k] for k in common if d[k]["kind"] != "correct"]
+            ok = [d[k] for k in common if d[k]["kind"] == "correct"]
+            out.append(f"| {label} | {rate(sum(r['verdict'] == 'BROKEN' for r in bug), len(bug))} | "
+                       f"{rate(sum(r['verdict'] == 'BROKEN' for r in ok), len(ok))} | "
+                       f"{sum(r['verdict'] == 'INCONCLUSIVE' for r in ok)} | {sum(r['verdict'] == 'INCONCLUSIVE' for r in bug)} |")
+
+    # Oracle confidence
     conf = [r for r in rows if r.get("oracle_confidence")]
     if conf:
         out.append("\n## Oracle confidence (reference validated against statement samples)\n")
@@ -117,7 +138,7 @@ def write_reports(done: dict[str, dict]):
     MD.write_text(summarize(rows), encoding="utf-8")
     fields = ["problem", "variant", "kind", "bug_type", "description", "strategy", "model", "verdict", "failure_verdict",
               "failure_category", "total_tests", "invalid_tests", "tool_steps", "llm_calls", "llm_cache_hits",
-              "exec_s", "wall_s", "minimized_len", "oracle_confidence", "error"]
+              "exec_s", "wall_s", "minimized_len", "validation", "oracle_confidence", "oracle_samples", "oracle_attempts", "error"]
     with open(CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
@@ -133,6 +154,8 @@ def main():
     ap.add_argument("--n-tests", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report-only", action="store_true")
+    ap.add_argument("--ref-validation", choices=["on", "off"], default="on",
+                    help="check the LLM-written reference against statement examples (off = pre-Part-B behaviour)")
     ap.add_argument("--no-confirm", action="store_true", help="skip witness check (trust all variants)")
     a = ap.parse_args()
 
@@ -146,16 +169,18 @@ def main():
     for p in load_problems(a.problems):
         variants, st = build_variants(p, a.mutants_per_type, a.seed, confirm=not a.no_confirm)
         print(f"\n== {p.name}: {len(variants) - 1} buggy variants ({st['unconfirmed']} unconfirmed mutants dropped)")
+        suffix = "|val" if a.ref_validation == "on" else ""
         todo = [(v, s) for v in variants for s in a.strategies
-                if f"{p.name}|{v.vid}|{s}|{settings.gemini_model}" not in done]
+                if f"{p.name}|{v.vid}|{s}|{settings.gemini_model}{suffix}" not in done]
         if not todo:
             continue
         # One spec + one oracle per problem, shared by every variant (so the oracle is not re-sampled per run).
         spec, _ = normalize_problem(p.statement, p.correct_code, p.language)
-        oracle = make_oracle(spec)
+        oracle = make_oracle(spec, get_examples(p.statement) if a.ref_validation == "on" else None)
+        print(f"  oracle: {oracle.confidence} - {oracle.check_note}")
         try:
             for v, s in todo:
-                key = f"{p.name}|{v.vid}|{s}|{settings.gemini_model}"
+                key = f"{p.name}|{v.vid}|{s}|{settings.gemini_model}{suffix}"
                 c0 = dict(llm.STATS)
                 t0 = time.perf_counter()
                 r = run_break(p.statement, v.code, v.language, strategy=s, n_tests=a.n_tests, oracle=oracle)
@@ -171,7 +196,9 @@ def main():
                     "llm_calls": d["calls"] + d["hits"], "llm_cache_hits": d["hits"],
                     "exec_s": round(exec_s, 2), "wall_s": round(exec_s + d["replayed_s"], 2),
                     "minimized_len": len(r.minimized.input) if r.minimized else 0,
-                    "oracle_confidence": getattr(r, "oracle_confidence", ""), "error": r.error[:300],
+                    "validation": a.ref_validation, "oracle_confidence": r.oracle_confidence or oracle.confidence,
+                    "oracle_samples": f"{oracle.samples_passed}/{oracle.samples_total}", "oracle_attempts": oracle.attempts,
+                    "error": (r.error or r.reason)[:300],
                 }
                 with open(RAW, "a", encoding="utf-8") as f:
                     f.write(json.dumps(row) + "\n")
