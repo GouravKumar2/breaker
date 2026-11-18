@@ -39,3 +39,8 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
+
+# eval artifacts
+eval/cache/*
+!eval/cache/.gitkeep
+eval/results/raw.jsonl

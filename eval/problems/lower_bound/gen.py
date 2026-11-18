@@ -1,0 +1,10 @@
+import random, sys
+r = random.Random(int(sys.argv[1]))
+n = r.choice([1, 2, 3, 5, 8, 20])
+lim = r.choice([3, 10, 10**9])
+a = sorted(r.randint(-lim, lim) for _ in range(n))
+x = r.choice([r.randint(-lim, lim), a[0], a[-1], a[0] - 1, a[-1] + 1, r.choice(a)])
+x = max(-10**9, min(10**9, x))
+print(n)
+print(*a)
+print(x)

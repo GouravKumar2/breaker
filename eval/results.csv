@@ -1,0 +1,8 @@
+problem,variant,kind,bug_type,description,strategy,model,verdict,failure_verdict,failure_category,total_tests,invalid_tests,tool_steps,llm_calls,llm_cache_hits,exec_s,wall_s,minimized_len,oracle_confidence,error
+max_subarray,correct,correct,,reference-correct solution,boundary,gemini-3.5-flash-lite,NO_BUG_FOUND,,,48,5,6,9,0,39.92,39.92,0,,
+max_subarray,hand:int32_overflow__wrap,handwritten,int32_overflow,int32_overflow__wrap,boundary,gemini-3.5-flash-lite,NO_BUG_FOUND,,,50,5,6,9,3,31.45,41.2,0,,
+max_subarray,hand:missing_edge_case__init_zero,handwritten,missing_edge_case,missing_edge_case__init_zero,boundary,gemini-3.5-flash-lite,BROKEN,fail_wrong_answer,boundary,1,0,3,4,3,2.54,12.29,5,,
+max_subarray,hand:wrong_loop_bound__skip_last,handwritten,wrong_loop_bound,wrong_loop_bound__skip_last,boundary,gemini-3.5-flash-lite,BROKEN,fail_wrong_answer,overflow,4,0,3,4,3,4.63,14.38,6,,
+max_subarray,mut:off_by_one:1,mutant,off_by_one,constant at line 3 incremented by 1,boundary,gemini-3.5-flash-lite,BROKEN,fail_runtime_error,boundary,1,0,3,4,3,3.42,13.17,4,,
+max_subarray,mut:off_by_one:2,mutant,off_by_one,constant at line 5 incremented by 1,boundary,gemini-3.5-flash-lite,BROKEN,fail_wrong_answer,overflow,4,0,3,4,3,4.48,14.23,6,,
+max_subarray,mut:wrong_loop_bound:1,mutant,wrong_loop_bound,for-loop at line 5 skips the last element,boundary,gemini-3.5-flash-lite,BROKEN,fail_wrong_answer,overflow,4,0,3,4,3,3.99,13.74,6,,

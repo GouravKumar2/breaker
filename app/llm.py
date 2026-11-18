@@ -1,6 +1,10 @@
 """The ONLY module that talks to an LLM. Swap providers by rewriting these two functions."""
+import hashlib
+import json
+import os
 import re
 import sys
+import threading
 import time
 from typing import Type, TypeVar
 
@@ -16,6 +20,13 @@ _client: genai.Client | None = None
 HTTP_TIMEOUT_MS = 90_000
 MIN_GAP_S = 4.0   # free tier gemini-2.5-flash = 5 req/min. Use 4.0 for gemini-2.5-flash-lite
 _last_call = 0.0
+_throttle_lock = threading.Lock()
+
+# --- optional on-disk response cache (used by the eval so reruns are free and resumable) ---
+_cache: dict[str, dict] | None = None
+_cache_path: str | None = None
+_cache_lock = threading.Lock()
+STATS = {"calls": 0, "hits": 0, "replayed_s": 0.0}   # eval reads deltas of this
 
 
 class LLMError(RuntimeError):
@@ -47,14 +58,55 @@ def _cfg(**kw) -> types.GenerateContentConfig:
 
 def _throttle():
     global _last_call
-    wait = MIN_GAP_S - (time.perf_counter() - _last_call)
-    if wait > 0:
-        time.sleep(wait)
-    _last_call = time.perf_counter()
+    with _throttle_lock:   # held while sleeping so concurrent threads queue up instead of racing
+        wait = MIN_GAP_S - (time.perf_counter() - _last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.perf_counter()
+
+
+def enable_cache(path: str) -> int:
+    """Turn on the JSONL response cache. Returns the number of entries loaded.
+    Append-only, so a crash mid-run loses nothing that was already written."""
+    global _cache, _cache_path
+    _cache, _cache_path = {}, path
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                    _cache[row["k"]] = row
+                except (ValueError, KeyError):
+                    continue   # torn last line from a crash
+    return len(_cache)
+
+
+def _jsonable(x):
+    if hasattr(x, "model_dump"):
+        x = x.model_dump(exclude_none=True)
+    return x
+
+
+def _cache_key(contents, config) -> str:
+    payload = {"model": settings.gemini_model, "salt": os.environ.get("BREAKER_CACHE_SALT", ""),
+               "contents": contents if isinstance(contents, str) else [_jsonable(c) for c in contents],
+               "config": _jsonable(config)}
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _call(contents, config: types.GenerateContentConfig):
     """One API call: throttled, and honors the server's suggested retry delay."""
+    key = None
+    if _cache is not None:
+        key = _cache_key(contents, config)
+        with _cache_lock:
+            row = _cache.get(key)
+        if row is not None:
+            STATS["hits"] += 1
+            STATS["replayed_s"] += row.get("latency", 0.0)
+            return types.GenerateContentResponse.model_validate_json(row["resp"])
     last = None
     for attempt in range(5):
         t0 = time.perf_counter()
@@ -64,7 +116,16 @@ def _call(contents, config: types.GenerateContentConfig):
             resp = _get_client().models.generate_content(
                 model=settings.gemini_model, contents=contents, config=config
             )
-            _log(f"got response in {time.perf_counter() - t0:.1f}s")
+            latency = time.perf_counter() - t0
+            _log(f"got response in {latency:.1f}s")
+            STATS["calls"] += 1
+            if key is not None:
+                row = {"k": key, "model": settings.gemini_model, "latency": round(latency, 2),
+                       "resp": resp.model_dump_json(exclude_none=True)}
+                with _cache_lock:
+                    _cache[key] = row
+                    with open(_cache_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(row) + "\n")
             return resp
         except Exception as e:
             last = e
